@@ -11,6 +11,7 @@ ezgif.com tarzı, tamamen çevrimdışı çalışan **video → GIF** uygulamas�
 
 - **Video → GIF:** başlangıç/bitiş, boyut (genişliğe/yüksekliğe göre), kırpma (oran veya siyah kenarları otomatik kaldırma).
 - **Her şey videodan okunur:** çözünürlük, süre ve kare hızı (FPS) videodan algılanır; kare sayısı için sabit bir sınır yoktur, tek sınır belleğe sığmaktır. Canlı bellek tahmini gösterilir, "Belleğe sığdır" boyutu otomatik küçültür. 1080p'ye kadar çözünürlük desteklenir.
+- **Akış modu:** kareler belleğe biriktirilmeden çıkarıldıkça GIF'e kodlanır; bellek sabit kalır. Belleğe sığmayan işler (ör. 1080p, 35 sn) otomatik bu modda yapılır, düzenleme araçları o çıktıda kapalıdır. Kareler oynatma sırasında ardışık yakalanır (kare başına arama yapılmaz), bu yüzden hızlıdır.
 - **Çıktı:** k-means / Floyd–Steinberg / Bayer / dither yok, 8–256 renk, tek veya kare başına palet, kare farkı optimizasyonu, döngü sayısı, hedef boyuta (KB) sıkıştırma.
 - **Düzenleme:** boyutlandır, kırp, döndür/çevir, ters çevir, hız, bumerang, efektler, metin, resim ekle, sansür, tuval, kare silme/çoğaltma/taşıma/kesme, geri al.
 - **Kaynaklar:** videodan, görsellerden, mevcut GIF'ten, ekran kaydından.

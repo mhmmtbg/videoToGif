@@ -124,8 +124,9 @@ video{width:100%;max-height:230px;background:#000;border-radius:4px}
           </div>
           <div class="row"><span class="hint" style="margin:0" id="vFpsInfo"></span>
           </div>
-          <div class="hint">Boyut, süre ve kare hızı videodan okunur. Kare sayısı için ayrı bir sınır yok; tek sınır belleğe sığmaktır (aşağıdaki tahmine bakın). 1080p'ye (1920×1080) kadar çözünürlük desteklenir.</div>
+          <div class="hint">Boyut, süre ve kare hızı videodan okunur; kare sayısı için sabit bir sınır yoktur. Video dosyası sıkıştırılmıştır, ama düzenlemek için kareler çözülmüş piksel olarak tutulur (1920×1080 bir kare ≈ 8,3 MB). Belleğe sığmayan işler otomatik olarak akış modunda yapılır.</div>
           <div class="info" id="vEst"></div>
+          <div class="row"><label><input type="checkbox" id="vStream"> Doğrudan GIF (akış modu): bellek sabit kalır, hızlıdır; düzenleme araçları kapalı olur</label></div>
           <div class="row"><button class="b p" id="vGo">GIF'e dönüştür</button><button class="b" id="vFit">Belleğe sığdır</button></div>
         </div>
       </div>
@@ -578,69 +579,79 @@ function quantRegion(d,W,x0,y0,bw,bh,mask,pal,n,tIdx,mode,map){
   return out;
 }
 
-/* ---------- GIF yazıcı ---------- */
-async function encodeGIF(frames,o,prog,cancelled){
-  const W=frames[0].img.width,H=frames[0].img.height,N=frames.length;
-  let hasAlpha=false;
-  outer:for(const f of frames){const d=f.img.data;for(let i=3;i<d.length;i+=4){if(d[i]<128){hasAlpha=true;break outer;}}}
-  const useDiff=!!o.diff&&!hasAlpha&&N>1,needT=useDiff||hasAlpha;
+/* ---------- GIF yazıcı (akış tabanlı: kare kare eklenir, yalnızca sıkıştırılmış veri tutulur) ---------- */
+function createGifStream(W,H,o,sample,hasAlpha){
+  const useDiff=!!o.diff&&!hasAlpha&&(o.frameCount||2)>1,needT=useDiff||hasAlpha;
   const total=Math.max(2,Math.min(256,(o.colors|0)||256));
   const K=Math.max(2,total-(needT?1:0));
   const mode=o.method||'hq',local=o.palette==='local',tol=o.tol|0,loop=o.loop|0;
   const push16=(a,v)=>{a.push(v&255,(v>>8)&255);};
-  let gpal=null,gn=0,gmap=null;
-  if(!local){const r=buildPalette(sampleFrames(frames,hasAlpha,150000),K,mode==='hq');gpal=r.pal;gn=r.n;gmap=makeMapper(gpal,gn);}
-  const ref=new Uint8Array(W*H*3),mask=new Uint8Array(W*H),recs=[];
+  let gpal=null,gn=0,gmap=null,gbits=0;
+  if(!local){const r=buildPalette(sampleFrames(sample,hasAlpha,150000),K,mode==='hq');gpal=r.pal;gn=r.n;gmap=makeMapper(gpal,gn);gbits=bitsFor(gn+(needT?1:0));}
+  const ref=new Uint8Array(W*H*3),mask=new Uint8Array(W*H),recs=[];let count=0;
+  return{
+    addFrame(img,delay){
+      const d=img.data;let x0=0,y0=0,x1=W-1,y1=H-1;
+      if(useDiff&&count>0){
+        let mnx=W,mny=H,mxx=-1,mxy=-1;
+        for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+          const p=y*W+x,q=p*4,r3=p*3;
+          const df=Math.abs(d[q]-ref[r3])+Math.abs(d[q+1]-ref[r3+1])+Math.abs(d[q+2]-ref[r3+2]);
+          if(df>tol){mask[p]=1;if(x<mnx)mnx=x;if(x>mxx)mxx=x;if(y<mny)mny=y;if(y>mxy)mxy=y;}else mask[p]=0;
+        }
+        if(mxx<0){recs[recs.length-1].delay+=delay;count++;return;}
+        x0=mnx;y0=mny;x1=mxx;y1=mxy;
+      }else{
+        for(let p=0;p<W*H;p++)mask[p]=hasAlpha?(d[p*4+3]>=128?1:0):1;
+      }
+      const bw=x1-x0+1,bh=y1-y0+1;
+      let pal,pn,map;
+      if(local){const r=buildPalette(sampleMask(d,W,x0,y0,bw,bh,mask,60000),K,mode==='hq');pal=r.pal;pn=r.n;map=makeMapper(pal,pn);}
+      else{pal=gpal;pn=gn;map=gmap;}
+      const idx=quantRegion(d,W,x0,y0,bw,bh,mask,pal,pn,needT?pn:0,mode,map);
+      if(useDiff){for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const p=y*W+x;if(mask[p]){const q=p*4,r3=p*3;ref[r3]=d[q];ref[r3+1]=d[q+1];ref[r3+2]=d[q+2];}}}
+      const bits=gpal?gbits:bitsFor(pn+(needT?1:0));
+      const id=[0x2C];push16(id,x0);push16(id,y0);push16(id,bw);push16(id,bh);
+      id.push(local?(0x80|(bits-1)):0);
+      const parts=[new Uint8Array(id)];
+      if(local){const pad=new Uint8Array(3<<bits);pad.set(pal.subarray(0,pn*3));parts.push(pad);}
+      const minc=Math.max(2,bits),code=lzwEncode(idx,minc);
+      const nb=Math.ceil(code.length/255),blk=new Uint8Array(1+code.length+nb+1);
+      blk[0]=minc;let bp=1;
+      for(let q=0;q<code.length;q+=255){const n=Math.min(255,code.length-q);blk[bp++]=n;blk.set(code.subarray(q,q+n),bp);bp+=n;}
+      blk[bp++]=0;parts.push(blk);
+      recs.push({delay,disp:hasAlpha?2:1,tr:needT?pn:0,parts});count++;
+    },
+    finish(){
+      const out=[],h=[0x47,0x49,0x46,0x38,0x39,0x61];
+      push16(h,W);push16(h,H);
+      if(gpal)h.push(0x80|((gbits-1)<<4)|(gbits-1));else h.push(0x70);
+      h.push(0,0);out.push(new Uint8Array(h));
+      if(gpal){const pad=new Uint8Array(3<<gbits);pad.set(gpal.subarray(0,gn*3));out.push(pad);}
+      if(loop!==1){const v=loop===0?0:loop-1;
+        out.push(new Uint8Array([0x21,0xFF,0x0B,78,69,84,83,67,65,80,69,50,46,48,3,1,v&255,(v>>8)&255,0]));}
+      for(const r of recs){
+        const cs=Math.min(65535,Math.max(2,Math.round(r.delay/10)));
+        out.push(new Uint8Array([0x21,0xF9,4,(r.disp<<2)|(needT?1:0),cs&255,cs>>8,r.tr,0]));
+        for(const q of r.parts)out.push(q);
+      }
+      out.push(new Uint8Array([0x3B]));
+      return new Blob(out,{type:'image/gif'});
+    }
+  };
+}
+async function encodeGIF(frames,o,prog,cancelled){
+  const W=frames[0].img.width,H=frames[0].img.height,N=frames.length;
+  let hasAlpha=false;
+  outer:for(const f of frames){const d=f.img.data;for(let i=3;i<d.length;i+=4){if(d[i]<128){hasAlpha=true;break outer;}}}
+  const st=createGifStream(W,H,{...o,frameCount:N},frames,hasAlpha);
   for(let i=0;i<N;i++){
     if(cancelled&&cancelled())throw 'cancel';
-    const f=frames[i],d=f.img.data;
-    let x0=0,y0=0,x1=W-1,y1=H-1;
-    if(useDiff&&i>0){
-      let mnx=W,mny=H,mxx=-1,mxy=-1;
-      for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-        const p=y*W+x,q=p*4,r3=p*3;
-        const df=Math.abs(d[q]-ref[r3])+Math.abs(d[q+1]-ref[r3+1])+Math.abs(d[q+2]-ref[r3+2]);
-        if(df>tol){mask[p]=1;if(x<mnx)mnx=x;if(x>mxx)mxx=x;if(y<mny)mny=y;if(y>mxy)mxy=y;}else mask[p]=0;
-      }
-      if(mxx<0){recs[recs.length-1].delay+=f.d;continue;}
-      x0=mnx;y0=mny;x1=mxx;y1=mxy;
-    }else{
-      for(let p=0;p<W*H;p++)mask[p]=hasAlpha?(d[p*4+3]>=128?1:0):1;
-    }
-    const bw=x1-x0+1,bh=y1-y0+1;
-    let pal,pn,map;
-    if(local){const r=buildPalette(sampleMask(d,W,x0,y0,bw,bh,mask,60000),K,mode==='hq');pal=r.pal;pn=r.n;map=makeMapper(pal,pn);}
-    else{pal=gpal;pn=gn;map=gmap;}
-    const tIdx=needT?pn:0;
-    const idx=quantRegion(d,W,x0,y0,bw,bh,mask,pal,pn,tIdx,mode,map);
-    if(useDiff){for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const p=y*W+x;if(mask[p]){const q=p*4,r3=p*3;ref[r3]=d[q];ref[r3+1]=d[q+1];ref[r3+2]=d[q+2];}}}
-    recs.push({x:x0,y:y0,w:bw,h:bh,idx,delay:f.d,pal:local?pal:null,pn,disp:hasAlpha?2:1});
+    st.addFrame(frames[i].img,frames[i].d);
     if(prog)prog((i+1)/N);
     if(i%2===1)await tick();
   }
-  const parts=[],h=[0x47,0x49,0x46,0x38,0x39,0x61];
-  push16(h,W);push16(h,H);
-  let gbits=0;
-  if(gpal){gbits=bitsFor(gn+(needT?1:0));h.push(0x80|((gbits-1)<<4)|(gbits-1));}else h.push(0x70);
-  h.push(0,0);parts.push(new Uint8Array(h));
-  if(gpal){const pad=new Uint8Array(3<<gbits);pad.set(gpal.subarray(0,gn*3));parts.push(pad);}
-  if(loop!==1){const v=loop===0?0:loop-1;
-    parts.push(new Uint8Array([0x21,0xFF,0x0B,78,69,84,83,67,65,80,69,50,46,48,3,1,v&255,(v>>8)&255,0]));}
-  for(const r of recs){
-    const cs=Math.min(65535,Math.max(2,Math.round(r.delay/10)));
-    const bits=gpal?gbits:bitsFor(r.pn+(needT?1:0));
-    parts.push(new Uint8Array([0x21,0xF9,4,(r.disp<<2)|(needT?1:0),cs&255,cs>>8,needT?r.pn:0,0]));
-    const id=[0x2C];push16(id,r.x);push16(id,r.y);push16(id,r.w);push16(id,r.h);
-    id.push(r.pal?(0x80|(bits-1)):0);parts.push(new Uint8Array(id));
-    if(r.pal){const pad=new Uint8Array(3<<bits);pad.set(r.pal.subarray(0,r.pn*3));parts.push(pad);}
-    const minc=Math.max(2,bits),code=lzwEncode(r.idx,minc);
-    const nb=Math.ceil(code.length/255),blk=new Uint8Array(1+code.length+nb+1);
-    blk[0]=minc;let bp=1;
-    for(let p=0;p<code.length;p+=255){const n=Math.min(255,code.length-p);blk[bp++]=n;blk.set(code.subarray(p,p+n),bp);bp+=n;}
-    blk[bp++]=0;parts.push(blk);
-  }
-  parts.push(new Uint8Array([0x3B]));
-  return new Blob(parts,{type:'image/gif'});
+  return st.finish();
 }
 
 /* ---------- GIF okuyucu ---------- */
@@ -934,13 +945,16 @@ $('cutGo').onclick=()=>{const a=Math.max(1,Math.round(num('cutA',1))),b=Math.min
 
 /* ---- çıktı ---- */
 function readOpts(){return{method:$('eMethod').value,colors:+$('eColors').value,palette:$('ePal').value,diff:$('eDiff').checked,tol:Math.max(0,num('eTol',10)),loop:Math.max(0,Math.round(num('eLoop',0))),target:num('eTarget',0)};}
-function setOut(blob,note){
+function showOut(blob,text){
   if(S.outURL){URL.revokeObjectURL(S.outURL);S.outURL=null;}
   S.outBlob=blob;const im=$('outImg');
-  if(!blob){im.hidden=true;im.removeAttribute('src');$('dlGif').disabled=true;$('encMsg').textContent='Henüz çıktı yok.';return;}
-  S.outURL=URL.createObjectURL(blob);im.src=S.outURL;im.hidden=false;$('dlGif').disabled=false;
+  if(!blob){im.hidden=true;im.removeAttribute('src');$('dlGif').disabled=true;$('encMsg').textContent=text||'Henüz çıktı yok.';return;}
+  S.outURL=URL.createObjectURL(blob);im.src=S.outURL;im.hidden=false;$('dlGif').disabled=false;$('encMsg').textContent=text;
+}
+function setOut(blob,note){
+  if(!blob||!S.frames.length)return showOut(null);
   const f=S.frames[0].img;
-  $('encMsg').textContent=`${f.width}×${f.height} · ${S.frames.length} kare · ${fmtKB(blob.size)}${note?' · '+note:''}`;
+  showOut(blob,`${f.width}×${f.height} · ${S.frames.length} kare · ${fmtKB(blob.size)}${note?' · '+note:''}`);
 }
 async function scaleFrames(frames,sc){const w=Math.max(1,Math.round(frames[0].img.width*sc)),h=Math.max(1,Math.round(frames[0].img.height*sc)),fn=resizeFn(w,h),out=[];
   for(let i=0;i<frames.length;i++){out.push({img:canvasToImg(fn(imgToCanvas(frames[i].img))),d:frames[i].d});if(i%8===7)await tick();}return out;}
@@ -1074,7 +1088,8 @@ function plan(){const start=Math.max(0,num('tStart',0)),end=Math.min(vid.duratio
   return{start,end,fps,n,w:o.w,h:o.h,bytes:n*o.w*o.h*4};}
 function estimate(){if(!vid.videoWidth)return;const p=plan(),el=$('vEst'),mb=b=>(b/1048576).toFixed(0)+' MB';
   el.textContent=p.n?`${p.n} kare · ${p.w}×${p.h} · tahmini bellek ${mb(p.bytes)} / sınır ${mb(MEM_LIMIT)}`:'Bitiş, başlangıçtan büyük olmalı.';
-  el.style.color=p.bytes>MEM_LIMIT?'#b91c1c':'';}
+  if(p.n&&p.bytes>MEM_LIMIT)el.textContent+=' — sınırı aşıyor: dönüştürme akış modunda yapılır (bellek sabit, düzenleme araçları kapalı).';
+  el.style.color=p.bytes>MEM_LIMIT?'#b45309':'';}
 function fitMemory(){const p=plan();if(!p.n||p.bytes<=MEM_LIMIT){estimate();return;}
   const s=Math.sqrt(MEM_LIMIT*0.92/p.bytes),mode=$('vSizeMode').value;
   if(mode==='h')$('vH').value=Math.max(8,Math.floor(p.h*s));else{$('vW').value=Math.max(8,Math.floor(p.w*s));if(mode==='wh')$('vH').value=Math.max(8,Math.floor(p.h*s));}
@@ -1092,6 +1107,55 @@ function detectFps(v){return new Promise(res=>{
   v.requestVideoFrameCallback(cb);v.currentTime=0;v.muted=true;v.play().catch(()=>fin());
 });}
 ['tStart','tEnd','fps','vW','vH','vSizeMode','vCrop'].forEach(id=>{$(id).addEventListener('input',estimate);$(id).addEventListener('change',estimate);});
+function createGrabber(start,end,fps,crop,w,h,seekOnly){
+  const dur=vid.duration,[c,x]=newCanvas(w,h);x.imageSmoothingQuality='high';
+  const half=0.45/Math.max(fps,S.fpsDet||fps);
+  const lastT=Math.max(0,Math.min(dur-0.02,end-0.001>start?end-0.001:start));
+  let usePlay=!seekOnly&&!!vid.requestVideoFrameCallback,curMT=-1;
+  vid.playbackRate=1;
+  const draw=()=>{x.drawImage(vid,crop.sx,crop.sy,crop.sw,crop.sh,0,0,w,h);return x.getImageData(0,0,w,h);};
+  const bySeek=async t=>{await seekTo(vid,t);curMT=vid.currentTime;return draw();};
+  const advance=t=>new Promise((res,rej)=>{
+    let fin=false;
+    const to=setTimeout(()=>{if(fin)return;fin=true;vid.pause();rej(new Error('timeout'));},4000);
+    const onEnd=()=>{if(fin)return;fin=true;clearTimeout(to);vid.pause();rej(new Error('ended'));};
+    vid.addEventListener('ended',onEnd,{once:true});
+    const cb=(now,md)=>{if(fin)return;
+      if(md.mediaTime>=t-half){fin=true;clearTimeout(to);vid.pause();vid.removeEventListener('ended',onEnd);curMT=md.mediaTime;res();}
+      else vid.requestVideoFrameCallback(cb);};
+    vid.requestVideoFrameCallback(cb);
+    vid.play().catch(e=>{if(!fin){fin=true;clearTimeout(to);rej(e);}});
+  });
+  /* Ardışık kare yakalama: oynatırken ilgili kareyi bekler, durdurur, çizer. Arama (seek) yalnızca gerekirse. */
+  return async i=>{
+    const t=Math.min(start+i/fps,lastT);
+    if(usePlay){
+      try{
+        if(i===0||curMT<0||t<curMT-1e-3||t-curMT>2)return await bySeek(t);
+        if(t<=curMT+half)return draw();
+        await advance(t);return draw();
+      }catch(e){usePlay=false;vid.pause();}
+    }
+    return bySeek(t);
+  };
+}
+async function streamConvert(P,crop,w,h){
+  const{start,end,fps,n}=P,dl=1000/fps;
+  const rnd=createGrabber(start,end,fps,crop,w,h,true);
+  const ns=Math.min(n,12),sample=[];
+  $('busyTxt').textContent='Palet için örnek kareler alınıyor…';
+  for(let k=0;k<ns;k++){if(S.cancel)return null;sample.push({img:await rnd(Math.floor(k*n/ns))});prog(0.05*k/ns);}
+  const st=createGifStream(w,h,{...readOpts(),frameCount:n},sample,false);
+  sample.length=0;
+  const grab=createGrabber(start,end,fps,crop,w,h,false);
+  for(let i=0;i<n;i++){
+    if(S.cancel){vid.pause();return null;}
+    st.addFrame(await grab(i),dl);
+    if(i%2===1){prog(0.05+0.95*i/n);$('busyTxt').textContent=`Kareler dönüştürülüyor… ${i+1}/${n}`;await tick();}
+  }
+  vid.pause();
+  return st.finish();
+}
 $('vFit').onclick=fitMemory;
 $('fpsAuto').onclick=()=>{if(S.fpsDet){$('fps').value=+Math.min(S.fpsDet,50).toFixed(2);estimate();}else toast('Videodan okunmuş bir değer yok.');};
 async function detectBars(v){
@@ -1114,14 +1178,20 @@ $('vGo').onclick=async()=>{
     const cm=$('vCrop').value;let crop=cropFor(cm);
     if(cm==='auto'){await seekTo(vid,start+(end-start)/2);crop=await detectBars(vid);}
     const sz=outSize(crop),w=sz.w,h=sz.h;
-    if(n*w*h*4>MEM_LIMIT)throw new Error(`Bellek yetmez (${n} kare × ${w}×${h}). "Belleğe sığdır"a basın ya da süreyi/FPS'i/boyutu düşürün.`);
-    const[c,x]=newCanvas(w,h);x.imageSmoothingQuality='high';const out=[],dl=1000/fps;
-    for(let i=0;i<n;i++){
-      if(S.cancel){toast('İptal edildi.');return;}
-      await seekTo(vid,Math.min(start+i/fps,Math.max(0,dur-0.02),end-0.001>start?end-0.001:start));
-      x.drawImage(vid,crop.sx,crop.sy,crop.sw,crop.sh,0,0,w,h);
-      out.push({img:x.getImageData(0,0,w,h),d:dl});if(i%4===3)prog(i/n);
+    if($('vStream').checked||n*w*h*4>MEM_LIMIT){
+      const t0=performance.now(),blob=await streamConvert(P,crop,w,h);
+      if(!blob){toast('İptal edildi.');return;}
+      S.frames=[];S.hist=[];S.checked=new Set();S.encToken++;framesChanged(false);
+      showOut(blob,`${w}×${h} · ${n} kare · ${fmtKB(blob.size)} · akış modu (düzenleme kapalı) · ${((performance.now()-t0)/1000).toFixed(0)} sn`);
+      toast('GIF hazır. Düzenlemek isterseniz süreyi/boyutu düşürüp akış modunu kapatın.');
+      return;
     }
+    const out=[],dl=1000/fps,grab=createGrabber(start,end,fps,crop,w,h,false);
+    for(let i=0;i<n;i++){
+      if(S.cancel){vid.pause();toast('İptal edildi.');return;}
+      out.push({img:await grab(i),d:dl});if(i%4===3)prog(i/n);
+    }
+    vid.pause();
     loadFrames(out);
   }catch(e){toast(e.message||String(e),true);}finally{unbusy();}
 };
