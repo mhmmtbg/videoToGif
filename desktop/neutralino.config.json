@@ -1,0 +1,47 @@
+{
+  "applicationId": "local.gifatolyesi",
+  "version": "1.1.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/resources/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "tokenSecurity": "one-time",
+  "logging": {
+    "enabled": false,
+    "writeToLogFile": false
+  },
+  "nativeAllowList": [
+    "app.exit",
+    "os.showSaveDialog",
+    "filesystem.writeBinaryFile"
+  ],
+  "modes": {
+    "window": {
+      "title": "GIF Atölyesi",
+      "width": 1280,
+      "height": 860,
+      "minWidth": 900,
+      "minHeight": 600,
+      "center": true,
+      "fullScreen": false,
+      "alwaysOnTop": false,
+      "icon": "/resources/icons/appIcon.png",
+      "enableInspector": false,
+      "borderless": false,
+      "maximize": false,
+      "hidden": false,
+      "resizable": true,
+      "exitProcessOnClose": true
+    }
+  },
+  "cli": {
+    "binaryName": "GifAtolyesi",
+    "resourcesPath": "/resources/",
+    "extensionsPath": "/extensions/",
+    "clientLibrary": "/resources/js/neutralino.js",
+    "binaryVersion": "nightly",
+    "clientVersion": "nightly"
+  }
+}

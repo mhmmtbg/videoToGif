@@ -1,0 +1,5 @@
+node_modules/
+desktop/dist/
+desktop/bin/neutralino-linux_*
+desktop/bin/neutralino-mac_*
+desktop/*.log
